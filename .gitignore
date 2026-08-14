@@ -1,0 +1,65 @@
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+env/
+
+# Local app/runtime data
+browser_data/
+data/*.db
+data/*.db-*
+data/*.sqlite
+data/*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.log
+logs/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+
+# Test/coverage output
+.pytest_cache/
+.coverage
+htmlcov/
+
+# PyInstaller and packaged artifacts
+dist/
+build/pyinstaller/
+build/pyinstaller-config/
+build/dmg-root/
+build/TikTokCreatorTool/
+build/TikTokCreatorTool*/
+*.exe
+*.msi
+*.dmg
+*.pkg
+*.app
+*.zip
+
+# Local export output
+*.xlsx
+*.xls
+*.csv
+
+# macOS/editor noise
+.DS_Store
+.idea/
+.vscode/
