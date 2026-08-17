@@ -53,6 +53,38 @@ class MigrationResult:
     message: str
 
 
+@dataclass(frozen=True)
+class CreatorScanCheckpoint:
+    segment_key: str
+    filters_json: str
+    next_page: int
+    next_item_cursor: int
+    page_size: int
+    has_more: bool
+    total_scanned: int
+    total_new: int
+    total_duplicate: int
+    last_success_at: str | None
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class CreatorScanRefreshState:
+    segment_key: str
+    filters_json: str
+    refresh_next_page: int
+    refresh_next_cursor: int
+    page_size: int
+    refresh_cycle: int
+    refresh_total_scanned: int
+    refresh_total_new: int
+    refresh_total_duplicate: int
+    refresh_restart_after_head: bool
+    last_refresh_at: str | None
+    last_cycle_completed_at: str | None
+    updated_at: str
+
+
 def _timestamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -296,6 +328,60 @@ class DatabaseRepository:
                     ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0
                     """
                 )
+
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS creator_scan_checkpoints (
+                    segment_key TEXT PRIMARY KEY,
+                    filters_json TEXT NOT NULL,
+                    next_page INTEGER NOT NULL DEFAULT 0,
+                    next_item_cursor INTEGER NOT NULL DEFAULT 0,
+                    page_size INTEGER NOT NULL DEFAULT 12,
+                    has_more INTEGER NOT NULL DEFAULT 1,
+                    total_scanned INTEGER NOT NULL DEFAULT 0,
+                    total_new INTEGER NOT NULL DEFAULT 0,
+                    total_duplicate INTEGER NOT NULL DEFAULT 0,
+                    last_success_at TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_creator_scan_checkpoints_updated_at
+                ON creator_scan_checkpoints(updated_at)
+                """
+            )
+
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS creator_scan_refresh_state (
+                    segment_key TEXT PRIMARY KEY,
+                    filters_json TEXT NOT NULL,
+                    refresh_next_page INTEGER NOT NULL DEFAULT 0,
+                    refresh_next_cursor INTEGER NOT NULL DEFAULT 0,
+                    page_size INTEGER NOT NULL DEFAULT 12,
+                    refresh_cycle INTEGER NOT NULL DEFAULT 1,
+                    refresh_total_scanned INTEGER NOT NULL DEFAULT 0,
+                    refresh_total_new INTEGER NOT NULL DEFAULT 0,
+                    refresh_total_duplicate INTEGER NOT NULL DEFAULT 0,
+                    refresh_restart_after_head INTEGER NOT NULL DEFAULT 1,
+                    last_refresh_at TEXT,
+                    last_cycle_completed_at TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_creator_scan_refresh_state_updated_at
+                ON creator_scan_refresh_state(updated_at)
+                """
+            )
 
             connection.commit()
         finally:
@@ -857,6 +943,271 @@ class DatabaseRepository:
             "error": status_counts.get("ERROR", 0),
             "processing": status_counts.get("PROCESSING", 0),
         }
+
+    def get_creator_scan_checkpoint(
+        self,
+        segment_key: str,
+    ) -> CreatorScanCheckpoint | None:
+        connection = self.get_connection()
+
+        try:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM creator_scan_checkpoints
+                WHERE segment_key = ?
+                LIMIT 1
+                """,
+                (segment_key,),
+            ).fetchone()
+        finally:
+            connection.close()
+
+        if row is None:
+            return None
+
+        return CreatorScanCheckpoint(
+            segment_key=str(row["segment_key"]),
+            filters_json=str(row["filters_json"]),
+            next_page=int(row["next_page"]),
+            next_item_cursor=int(row["next_item_cursor"]),
+            page_size=int(row["page_size"]),
+            has_more=bool(row["has_more"]),
+            total_scanned=int(row["total_scanned"]),
+            total_new=int(row["total_new"]),
+            total_duplicate=int(row["total_duplicate"]),
+            last_success_at=row["last_success_at"],
+            updated_at=str(row["updated_at"]),
+        )
+
+    def save_creator_scan_checkpoint(
+        self,
+        segment_key: str,
+        filters_json: str,
+        next_page: int,
+        next_item_cursor: int,
+        page_size: int,
+        has_more: bool,
+        scanned_delta: int = 0,
+        new_delta: int = 0,
+        duplicate_delta: int = 0,
+    ) -> None:
+        now = datetime.now().isoformat(
+            timespec="seconds"
+        )
+        connection = self.get_connection()
+
+        try:
+            connection.execute(
+                """
+                INSERT INTO creator_scan_checkpoints (
+                    segment_key,
+                    filters_json,
+                    next_page,
+                    next_item_cursor,
+                    page_size,
+                    has_more,
+                    total_scanned,
+                    total_new,
+                    total_duplicate,
+                    last_success_at,
+                    updated_at
+                )
+                VALUES (
+                    :segment_key,
+                    :filters_json,
+                    :next_page,
+                    :next_item_cursor,
+                    :page_size,
+                    :has_more,
+                    :scanned_delta,
+                    :new_delta,
+                    :duplicate_delta,
+                    :now,
+                    :now
+                )
+                ON CONFLICT(segment_key)
+                DO UPDATE SET
+                    filters_json = excluded.filters_json,
+                    next_page = excluded.next_page,
+                    next_item_cursor = excluded.next_item_cursor,
+                    page_size = excluded.page_size,
+                    has_more = excluded.has_more,
+                    total_scanned = (
+                        creator_scan_checkpoints.total_scanned
+                        + excluded.total_scanned
+                    ),
+                    total_new = (
+                        creator_scan_checkpoints.total_new
+                        + excluded.total_new
+                    ),
+                    total_duplicate = (
+                        creator_scan_checkpoints.total_duplicate
+                        + excluded.total_duplicate
+                    ),
+                    last_success_at = excluded.last_success_at,
+                    updated_at = excluded.updated_at
+                """,
+                {
+                    "segment_key": segment_key,
+                    "filters_json": filters_json,
+                    "next_page": next_page,
+                    "next_item_cursor": next_item_cursor,
+                    "page_size": page_size,
+                    "has_more": 1 if has_more else 0,
+                    "scanned_delta": scanned_delta,
+                    "new_delta": new_delta,
+                    "duplicate_delta": duplicate_delta,
+                    "now": now,
+                },
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def get_creator_scan_refresh_state(
+        self,
+        segment_key: str,
+    ) -> CreatorScanRefreshState | None:
+        connection = self.get_connection()
+
+        try:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM creator_scan_refresh_state
+                WHERE segment_key = ?
+                LIMIT 1
+                """,
+                (segment_key,),
+            ).fetchone()
+        finally:
+            connection.close()
+
+        if row is None:
+            return None
+
+        return CreatorScanRefreshState(
+            segment_key=str(row["segment_key"]),
+            filters_json=str(row["filters_json"]),
+            refresh_next_page=int(row["refresh_next_page"]),
+            refresh_next_cursor=int(row["refresh_next_cursor"]),
+            page_size=int(row["page_size"]),
+            refresh_cycle=int(row["refresh_cycle"]),
+            refresh_total_scanned=int(row["refresh_total_scanned"]),
+            refresh_total_new=int(row["refresh_total_new"]),
+            refresh_total_duplicate=int(
+                row["refresh_total_duplicate"]
+            ),
+            refresh_restart_after_head=bool(
+                row["refresh_restart_after_head"]
+            ),
+            last_refresh_at=row["last_refresh_at"],
+            last_cycle_completed_at=row["last_cycle_completed_at"],
+            updated_at=str(row["updated_at"]),
+        )
+
+    def save_creator_scan_refresh_state(
+        self,
+        segment_key: str,
+        filters_json: str,
+        refresh_next_page: int,
+        refresh_next_cursor: int,
+        page_size: int,
+        refresh_cycle: int,
+        refresh_restart_after_head: bool,
+        scanned_delta: int = 0,
+        new_delta: int = 0,
+        duplicate_delta: int = 0,
+        cycle_completed: bool = False,
+    ) -> None:
+        now = datetime.now().isoformat(
+            timespec="seconds"
+        )
+        last_cycle_completed_at = now if cycle_completed else None
+        connection = self.get_connection()
+
+        try:
+            connection.execute(
+                """
+                INSERT INTO creator_scan_refresh_state (
+                    segment_key,
+                    filters_json,
+                    refresh_next_page,
+                    refresh_next_cursor,
+                    page_size,
+                    refresh_cycle,
+                    refresh_total_scanned,
+                    refresh_total_new,
+                    refresh_total_duplicate,
+                    refresh_restart_after_head,
+                    last_refresh_at,
+                    last_cycle_completed_at,
+                    updated_at
+                )
+                VALUES (
+                    :segment_key,
+                    :filters_json,
+                    :refresh_next_page,
+                    :refresh_next_cursor,
+                    :page_size,
+                    :refresh_cycle,
+                    :scanned_delta,
+                    :new_delta,
+                    :duplicate_delta,
+                    :refresh_restart_after_head,
+                    :now,
+                    :last_cycle_completed_at,
+                    :now
+                )
+                ON CONFLICT(segment_key)
+                DO UPDATE SET
+                    filters_json = excluded.filters_json,
+                    refresh_next_page = excluded.refresh_next_page,
+                    refresh_next_cursor = excluded.refresh_next_cursor,
+                    page_size = excluded.page_size,
+                    refresh_cycle = excluded.refresh_cycle,
+                    refresh_total_scanned = (
+                        creator_scan_refresh_state.refresh_total_scanned
+                        + excluded.refresh_total_scanned
+                    ),
+                    refresh_total_new = (
+                        creator_scan_refresh_state.refresh_total_new
+                        + excluded.refresh_total_new
+                    ),
+                    refresh_total_duplicate = (
+                        creator_scan_refresh_state.refresh_total_duplicate
+                        + excluded.refresh_total_duplicate
+                    ),
+                    refresh_restart_after_head =
+                        excluded.refresh_restart_after_head,
+                    last_refresh_at = excluded.last_refresh_at,
+                    last_cycle_completed_at = COALESCE(
+                        excluded.last_cycle_completed_at,
+                        creator_scan_refresh_state.last_cycle_completed_at
+                    ),
+                    updated_at = excluded.updated_at
+                """,
+                {
+                    "segment_key": segment_key,
+                    "filters_json": filters_json,
+                    "refresh_next_page": refresh_next_page,
+                    "refresh_next_cursor": refresh_next_cursor,
+                    "page_size": page_size,
+                    "refresh_cycle": refresh_cycle,
+                    "refresh_restart_after_head": (
+                        1 if refresh_restart_after_head else 0
+                    ),
+                    "scanned_delta": scanned_delta,
+                    "new_delta": new_delta,
+                    "duplicate_delta": duplicate_delta,
+                    "now": now,
+                    "last_cycle_completed_at": last_cycle_completed_at,
+                },
+            )
+            connection.commit()
+        finally:
+            connection.close()
 
 
 def prepare_database(
