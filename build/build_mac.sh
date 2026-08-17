@@ -88,3 +88,6 @@ if command -v codesign >/dev/null 2>&1; then
 fi
 
 echo "Built app: ${APP_PATH}"
+
+echo "Creating DMG..."
+"${PROJECT_ROOT}/build/create_dmg.sh"
